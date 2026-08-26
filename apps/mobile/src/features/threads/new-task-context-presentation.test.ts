@@ -4,7 +4,19 @@ import {
   resolveNewTaskBranchWorktreePath,
   resolveNewTaskBranchLabel,
   resolveNewTaskLocalWorkspaceSelection,
+  resolveNewTaskWorkspaceMode,
 } from "./new-task-context-presentation";
+
+describe("resolveNewTaskWorkspaceMode", () => {
+  it("allows new worktrees only in Git repositories", () => {
+    expect(resolveNewTaskWorkspaceMode({ requestedMode: "worktree", isGitRepo: true })).toBe(
+      "worktree",
+    );
+    expect(resolveNewTaskWorkspaceMode({ requestedMode: "worktree", isGitRepo: false })).toBe(
+      "local",
+    );
+  });
+});
 
 describe("resolveNewTaskLocalWorkspaceSelection", () => {
   it("waits for refs instead of carrying a worktree base into Current checkout", () => {

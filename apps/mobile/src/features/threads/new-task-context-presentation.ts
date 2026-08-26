@@ -1,5 +1,12 @@
 type WorkspaceMode = "local" | "worktree";
 
+export function resolveNewTaskWorkspaceMode(input: {
+  readonly requestedMode: WorkspaceMode;
+  readonly isGitRepo: boolean;
+}): WorkspaceMode {
+  return input.isGitRepo ? input.requestedMode : "local";
+}
+
 export function resolveNewTaskWorkspaceLabel(input: {
   readonly workspaceMode: WorkspaceMode;
   readonly worktreePath: string | null;
