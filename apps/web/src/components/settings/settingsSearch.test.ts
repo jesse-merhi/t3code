@@ -90,4 +90,12 @@ describe("searchSettings", () => {
       targetId: "appearance",
     });
   });
+
+  it("routes branch prefix to source control", () => {
+    expect(searchSettings("branch prefix")[0]).toMatchObject({
+      id: "branch-prefix",
+      to: "/settings/source-control",
+      targetId: "source-control",
+    });
+  });
 });

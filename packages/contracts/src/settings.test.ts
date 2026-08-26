@@ -226,6 +226,20 @@ describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
   });
 });
 
+describe("ServerSettings branch prefix", () => {
+  it("uses an empty configured value so the client can present the default as a placeholder", () => {
+    expect(decodeServerSettings({}).branchPrefix).toBe("");
+  });
+
+  it("trims custom prefixes at the settings boundary", () => {
+    expect(decodeServerSettingsPatch({ branchPrefix: "  jesse/  " }).branchPrefix).toBe("jesse/");
+  });
+
+  it("rejects prefixes longer than the supported input", () => {
+    expect(() => decodeServerSettingsPatch({ branchPrefix: "a".repeat(65) })).toThrow();
+  });
+});
+
 describe("provider enabled defaults", () => {
   it("enables only the stable bindings by default", () => {
     const decoded = decodeServerSettings({});

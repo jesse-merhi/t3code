@@ -63,6 +63,12 @@ The **Source Control settings** page shows you exactly what's connected:
 
 Run a quick **Rescan** after setting up a new machine or changing credentials.
 
+### Choose the Branch Prefix
+
+T3 Code gives new worktree branches a short, agent-generated name. To customize the prefix placed
+before that name, open **Settings → Source Control**, expand **Git**, and set **Branch prefix**.
+Clearing the field restores the default `t3code/` prefix.
+
 ## Getting Started
 
 ### For GitHub (Recommended for most users)

@@ -2,20 +2,22 @@ import { ChevronDownIcon, GitPullRequestIcon, RefreshCwIcon } from "lucide-react
 import * as Duration from "effect/Duration";
 import * as Option from "effect/Option";
 import { useState, type ReactNode } from "react";
-import type {
-  BackgroundActivitySettings,
-  SourceControlProviderKind,
-  SourceControlDiscoveryResult,
-  SourceControlProviderAuth,
-  SourceControlProviderDiscoveryItem,
-  VcsDriverKind,
-  VcsDiscoveryItem,
+import {
+  MAX_BRANCH_PREFIX_LENGTH,
+  type BackgroundActivitySettings,
+  type SourceControlProviderKind,
+  type SourceControlDiscoveryResult,
+  type SourceControlProviderAuth,
+  type SourceControlProviderDiscoveryItem,
+  type VcsDriverKind,
+  type VcsDiscoveryItem,
 } from "@t3tools/contracts";
 import {
   getBackgroundActivityBaseProfile,
   getBackgroundActivityPresetSettings,
   resolveServerBackgroundActivitySettings,
 } from "@t3tools/shared/backgroundActivitySettings";
+import { WORKTREE_BRANCH_PREFIX } from "@t3tools/shared/git";
 
 import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
@@ -34,6 +36,7 @@ import {
   EmptyTitle,
 } from "../ui/empty";
 import { Skeleton } from "../ui/skeleton";
+import { DraftInput } from "../ui/draft-input";
 import {
   NumberField,
   NumberFieldDecrement,
@@ -331,7 +334,7 @@ function DiscoveryItemRow({
   );
 }
 
-function GitFetchIntervalSettings() {
+function GitSettings() {
   const settings = usePrimarySettings();
   const updateSettings = useUpdatePrimarySettings();
   const resolvedBackgroundActivity = resolveServerBackgroundActivitySettings(settings);
@@ -348,6 +351,42 @@ function GitFetchIntervalSettings() {
 
   return (
     <div className="grid gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0 space-y-1">
+          <div className="flex min-w-0 items-center gap-1">
+            <span className="text-xs font-medium text-foreground">
+              {searchableSetting("branch-prefix").title}
+            </span>
+            <span
+              className={cn(
+                "inline-flex size-5 shrink-0 items-center justify-center transition-opacity",
+                settings.branchPrefix ? "opacity-100" : "pointer-events-none opacity-0",
+              )}
+              aria-hidden={!settings.branchPrefix}
+            >
+              {settings.branchPrefix ? (
+                <SettingResetButton
+                  label="branch prefix"
+                  onClick={() => updateSettings({ branchPrefix: "" })}
+                />
+              ) : null}
+            </span>
+          </div>
+          <p className="max-w-2xl text-xs leading-relaxed text-muted-foreground">
+            Prefix used when T3 Code creates new branches.
+          </p>
+        </div>
+        <DraftInput
+          className="w-full shrink-0 sm:w-64"
+          size="sm"
+          value={settings.branchPrefix}
+          onCommit={(branchPrefix) => updateSettings({ branchPrefix })}
+          placeholder={`${WORKTREE_BRANCH_PREFIX}/`}
+          maxLength={MAX_BRANCH_PREFIX_LENGTH}
+          spellCheck={false}
+          aria-label="Branch prefix"
+        />
+      </div>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0 space-y-1">
           <div className="flex min-w-0 items-center gap-1">
@@ -553,9 +592,7 @@ export function SourceControlSettingsPanel() {
             >
               {result.versionControlSystems.map((item) => (
                 <DiscoveryItemRow key={`vcs:${item.kind}`} item={item}>
-                  {item.kind === "git" && isPrimaryEnvironment ? (
-                    <GitFetchIntervalSettings />
-                  ) : undefined}
+                  {item.kind === "git" && isPrimaryEnvironment ? <GitSettings /> : undefined}
                 </DiscoveryItemRow>
               ))}
             </SettingsSection>

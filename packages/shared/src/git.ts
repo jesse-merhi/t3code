@@ -104,6 +104,26 @@ export function buildTemporaryWorktreeBranchName(
   return `${WORKTREE_BRANCH_PREFIX}/${token}`;
 }
 
+/**
+ * Build the semantic branch name used after a new worktree's first prompt.
+ * An empty configured prefix restores the product default, matching Codex's
+ * empty-field behavior for its branch prefix setting.
+ */
+export function buildGeneratedWorktreeBranchName(raw: string, configuredPrefix: string): string {
+  const trimmedPrefix = configuredPrefix.trim().replace(/\/+$/g, "");
+  const prefix =
+    trimmedPrefix.length > 0 ? sanitizeBranchFragment(trimmedPrefix) : WORKTREE_BRANCH_PREFIX;
+  const normalizedBranch = sanitizeBranchFragment(raw.trim().replace(/^refs\/heads\//i, ""));
+  const matchingPrefix = [prefix, WORKTREE_BRANCH_PREFIX].find((candidate) =>
+    normalizedBranch.startsWith(`${candidate}/`),
+  );
+  const withoutPrefix = matchingPrefix
+    ? normalizedBranch.slice(`${matchingPrefix}/`.length)
+    : normalizedBranch;
+
+  return `${prefix}/${sanitizeBranchFragment(withoutPrefix)}`;
+}
+
 export function isTemporaryWorktreeBranch(refName: string): boolean {
   return TEMP_WORKTREE_BRANCH_PATTERN.test(refName.trim().toLowerCase());
 }

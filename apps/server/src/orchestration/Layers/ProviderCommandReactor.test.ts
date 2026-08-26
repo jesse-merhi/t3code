@@ -145,6 +145,7 @@ describe("ProviderCommandReactor", () => {
 
   async function createHarness(input?: {
     readonly baseDir?: string;
+    readonly branchPrefix?: string;
     readonly threadModelSelection?: ModelSelection;
     readonly sessionModelSwitch?: "unsupported" | "in-session";
     readonly requiresNewThreadForModelChange?: boolean;
@@ -426,7 +427,9 @@ describe("ProviderCommandReactor", () => {
           generateThreadTitle,
         }),
       ),
-      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(
+        ServerSettingsService.layerTest({ branchPrefix: input?.branchPrefix ?? "" }),
+      ),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
       Layer.provideMerge(NodeServices.layer),
     );
@@ -1473,7 +1476,7 @@ describe("ProviderCommandReactor", () => {
   });
 
   it("generates a worktree branch name for the first turn", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ branchPrefix: "jesse/" });
     const now = "2026-01-01T00:00:00.000Z";
 
     await Effect.runPromise(
@@ -1522,6 +1525,11 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.refreshStatus.mock.calls.length === 1);
     expect(harness.generateBranchName.mock.calls[0]?.[0]).toMatchObject({
       message: "Add a safer reconnect backoff.",
+    });
+    expect(harness.renameBranch).toHaveBeenCalledWith({
+      cwd: "/tmp/provider-project-worktree",
+      oldBranch: "t3code/1234abcd",
+      newBranch: "jesse/feature/gpt-5-6-luna",
     });
     expect(harness.refreshStatus.mock.calls[0]?.[0]).toBe("/tmp/provider-project-worktree");
   });

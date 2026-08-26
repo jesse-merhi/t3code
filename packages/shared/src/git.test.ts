@@ -3,12 +3,42 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   applyGitStatusStreamEvent,
+  buildGeneratedWorktreeBranchName,
   buildTemporaryWorktreeBranchName,
   isTemporaryWorktreeBranch,
   normalizeGitRemoteUrl,
   parseGitHubRepositoryNameWithOwnerFromRemoteUrl,
   WORKTREE_BRANCH_PREFIX,
 } from "./git.ts";
+
+describe("buildGeneratedWorktreeBranchName", () => {
+  it("uses the T3 Code prefix when the configured field is empty", () => {
+    expect(buildGeneratedWorktreeBranchName("Fix reconnect state", "")).toBe(
+      "t3code/fix-reconnect-state",
+    );
+  });
+
+  it("uses and sanitizes a custom prefix", () => {
+    expect(buildGeneratedWorktreeBranchName("Fix reconnect state", " Jesse Team/ ")).toBe(
+      "jesse-team/fix-reconnect-state",
+    );
+  });
+
+  it("does not duplicate a prefix echoed by the generator", () => {
+    expect(buildGeneratedWorktreeBranchName("jesse/fix-reconnect-state", "jesse/")).toBe(
+      "jesse/fix-reconnect-state",
+    );
+    expect(buildGeneratedWorktreeBranchName("t3code/fix-reconnect-state", "jesse/")).toBe(
+      "jesse/fix-reconnect-state",
+    );
+  });
+
+  it("strips a fully qualified local branch ref", () => {
+    expect(buildGeneratedWorktreeBranchName("refs/heads/fix-reconnect-state", "jesse/")).toBe(
+      "jesse/fix-reconnect-state",
+    );
+  });
+});
 
 describe("normalizeGitRemoteUrl", () => {
   it("canonicalizes equivalent GitHub remotes across protocol variants", () => {
