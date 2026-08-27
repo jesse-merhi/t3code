@@ -660,9 +660,6 @@ export function AddProjectRepositoryScreen(props: {
   const lookupRepositoryQuery = useAtomQueryRunner(sourceControlEnvironment.repository, {
     reportFailure: false,
   });
-  const searchRepositoriesQuery = useAtomQueryRunner(sourceControlEnvironment.repositorySearch, {
-    reportFailure: false,
-  });
   const navigation = useNavigation();
   const iconColor = useThemeColor("--color-icon");
   const environment = useEnvironmentFromParam(props.environmentId);
@@ -670,8 +667,6 @@ export function AddProjectRepositoryScreen(props: {
   const [repositoryInput, setRepositoryInput] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [repositories, setRepositories] =
-    useState<ReadonlyArray<SourceControlRepositoryInfo> | null>(null);
   const normalizedRepositoryInput = repositoryInput.trim();
   const debouncedRepositoryInput = useDebouncedValue(
     normalizedRepositoryInput,
@@ -679,49 +674,26 @@ export function AddProjectRepositoryScreen(props: {
   );
   const githubRepositorySearchEnvironmentId =
     source === "github" ? (environment?.environmentId ?? null) : null;
-
-  useEffect(() => {
-    if (githubRepositorySearchEnvironmentId === null) {
-      return;
-    }
-    if (
-      normalizedRepositoryInput.length === 0 ||
-      normalizedRepositoryInput !== debouncedRepositoryInput
-    ) {
-      setIsSubmitting(normalizedRepositoryInput.length > 0);
-      return;
-    }
-
-    let cancelled = false;
-    setError(null);
-    setIsSubmitting(true);
-    void searchRepositoriesQuery({
-      environmentId: githubRepositorySearchEnvironmentId,
-      input: {
-        provider: "github",
-        query: debouncedRepositoryInput,
-      },
-    }).then((result) => {
-      if (cancelled) {
-        return;
-      }
-      setIsSubmitting(false);
-      if (AsyncResult.isFailure(result)) {
-        setError(errorMessage(Cause.squash(result.cause)));
-      } else {
-        setRepositories(result.value);
-      }
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    debouncedRepositoryInput,
-    githubRepositorySearchEnvironmentId,
-    normalizedRepositoryInput,
-    searchRepositoriesQuery,
-  ]);
+  const settledRepositoryInput =
+    normalizedRepositoryInput.length > 0 && normalizedRepositoryInput === debouncedRepositoryInput
+      ? debouncedRepositoryInput
+      : null;
+  const repositorySearch = useEnvironmentQuery(
+    githubRepositorySearchEnvironmentId !== null && settledRepositoryInput !== null
+      ? sourceControlEnvironment.repositorySearch({
+          environmentId: githubRepositorySearchEnvironmentId,
+          input: {
+            provider: "github",
+            query: settledRepositoryInput,
+          },
+        })
+      : null,
+  );
+  const repositories = repositorySearch.data;
+  const isRepositorySearchPending =
+    normalizedRepositoryInput.length > 0 &&
+    (normalizedRepositoryInput !== debouncedRepositoryInput || repositorySearch.isPending);
+  const visibleError = error ?? repositorySearch.error;
 
   const selectRepository = useCallback(
     (repository: SourceControlRepositoryInfo) => {
@@ -790,7 +762,7 @@ export function AddProjectRepositoryScreen(props: {
 
   return (
     <AddProjectShell>
-      {error ? <ErrorBanner message={error} /> : null}
+      {visibleError ? <ErrorBanner message={visibleError} /> : null}
       {environment ? (
         <>
           <TextInput
@@ -798,7 +770,6 @@ export function AddProjectRepositoryScreen(props: {
             value={repositoryInput}
             onChangeText={(value) => {
               if (value.trim() !== normalizedRepositoryInput) {
-                setRepositories(null);
                 setError(null);
               }
               setRepositoryInput(value);
@@ -821,7 +792,7 @@ export function AddProjectRepositoryScreen(props: {
               loading={isSubmitting}
             />
           )}
-          {source === "github" && isSubmitting ? (
+          {source === "github" && isRepositorySearchPending ? (
             <View className="items-center py-3">
               <ActivityIndicator />
             </View>
