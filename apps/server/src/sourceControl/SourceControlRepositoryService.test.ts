@@ -117,6 +117,44 @@ it.effect("looks up repositories through the requested provider without search",
   }).pipe(Effect.provide(makeLayer({ provider })));
 });
 
+it.effect("returns all repository search results in provider order", () => {
+  const calls: Array<{ cwd: string; query: string }> = [];
+  const provider = makeProvider({
+    searchRepositories: (input) =>
+      Effect.sync(() => {
+        calls.push(input);
+        return [
+          CLONE_URLS,
+          {
+            nameWithOwner: "mattpocock/t3code",
+            url: "https://github.com/mattpocock/t3code",
+            sshUrl: "git@github.com:mattpocock/t3code.git",
+          },
+        ];
+      }),
+  });
+
+  return Effect.gen(function* () {
+    const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+    const result = yield* service.searchRepositories({
+      provider: "github",
+      query: "t3code",
+      cwd: "/workspace",
+    });
+
+    assert.deepStrictEqual(result, [
+      { provider: "github", ...CLONE_URLS },
+      {
+        provider: "github",
+        nameWithOwner: "mattpocock/t3code",
+        url: "https://github.com/mattpocock/t3code",
+        sshUrl: "git@github.com:mattpocock/t3code.git",
+      },
+    ]);
+    assert.deepStrictEqual(calls, [{ cwd: "/workspace", query: "t3code" }]);
+  }).pipe(Effect.provide(makeLayer({ provider })));
+});
+
 it.effect("preserves provider failures without deriving the repository message from them", () => {
   const providerCause = new SourceControlProviderError({
     provider: "github",

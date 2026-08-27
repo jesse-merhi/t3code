@@ -88,7 +88,7 @@ export function addProjectRemoteSourceLabel(source: AddProjectRemoteSource): str
 export function addProjectRemoteSourcePathHint(source: AddProjectRemoteSource): string {
   switch (source) {
     case "github":
-      return "owner/repo";
+      return "owner/repo or repository name";
     case "gitlab":
       return "group/project";
     case "bitbucket":
@@ -109,10 +109,14 @@ export function addProjectRemoteSourceProvider(
 const GITHUB_REPOSITORY_SHORTHAND =
   /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9._-]+(?:\.git)?$/;
 
+export function isGitHubRepositoryShorthand(input: string): boolean {
+  return GITHUB_REPOSITORY_SHORTHAND.test(input.trim());
+}
+
 /** Treat the common owner/repository shorthand as a public GitHub HTTPS URL. */
 export function normalizePastedCloneUrl(input: string): string {
   const trimmed = input.trim();
-  if (!GITHUB_REPOSITORY_SHORTHAND.test(trimmed)) return trimmed;
+  if (!isGitHubRepositoryShorthand(trimmed)) return trimmed;
   const repository = trimmed.endsWith(".git") ? trimmed : `${trimmed}.git`;
   return `https://github.com/${repository}`;
 }

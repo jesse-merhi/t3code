@@ -1,5 +1,8 @@
+import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
 import * as Result from "effect/Result";
@@ -18,6 +21,8 @@ import {
 } from "./gitHubPullRequests.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+const GITHUB_DOT_COM = "github.com";
+const AUTH_ACCOUNT_CACHE_TTL = Duration.minutes(5);
 
 const gitHubCliFailureFields = {
   command: Schema.Literal("gh"),
@@ -40,7 +45,11 @@ export class GitHubCliUnavailableError extends Schema.TaggedErrorClass<GitHubCli
 
 export class GitHubCliAuthenticationError extends Schema.TaggedErrorClass<GitHubCliAuthenticationError>()(
   "GitHubCliAuthenticationError",
-  gitHubCliFailureFields,
+  {
+    command: Schema.Literal("gh"),
+    cwd: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  },
 ) {
   get detail(): string {
     return "GitHub CLI is not authenticated. Run `gh auth login` and retry.";
@@ -148,6 +157,19 @@ export class GitHubRepositoryDecodeError extends Schema.TaggedErrorClass<GitHubR
   }
 }
 
+export class GitHubRepositorySearchDecodeError extends Schema.TaggedErrorClass<GitHubRepositorySearchDecodeError>()(
+  "GitHubRepositorySearchDecodeError",
+  gitHubCliDecodeFields,
+) {
+  get detail(): string {
+    return "GitHub CLI returned invalid repository search JSON.";
+  }
+
+  override get message(): string {
+    return `GitHub CLI failed in searchRepositories: ${this.detail}`;
+  }
+}
+
 export const GitHubCliError = Schema.Union([
   GitHubCliUnavailableError,
   GitHubCliAuthenticationError,
@@ -158,6 +180,7 @@ export const GitHubCliError = Schema.Union([
   GitHubChangeRequestListDecodeError,
   GitHubPullRequestDecodeError,
   GitHubRepositoryDecodeError,
+  GitHubRepositorySearchDecodeError,
 ]);
 export type GitHubCliError = typeof GitHubCliError.Type;
 
@@ -241,6 +264,11 @@ export class GitHubCli extends Context.Service<
       readonly repository: string;
     }) => Effect.Effect<GitHubRepositoryCloneUrls, GitHubCliError>;
 
+    readonly searchRepositories: (input: {
+      readonly cwd: string;
+      readonly query: string;
+    }) => Effect.Effect<ReadonlyArray<GitHubRepositoryCloneUrls>, GitHubCliError>;
+
     readonly createRepository: (input: {
       readonly cwd: string;
       readonly repository: string;
@@ -276,6 +304,14 @@ const decodeRawGitHubRepositoryCloneUrls = Schema.decodeEffect(
   Schema.fromJsonString(RawGitHubRepositoryCloneUrlsSchema),
 );
 
+const RawGitHubRepositorySearchResultSchema = Schema.Struct({
+  fullName: TrimmedNonEmptyString,
+  url: Schema.URLFromString,
+});
+const decodeRawGitHubRepositorySearchResults = Schema.decodeEffect(
+  Schema.fromJsonString(Schema.Array(RawGitHubRepositorySearchResultSchema)),
+);
+
 function normalizeRepositoryCloneUrls(
   raw: Schema.Schema.Type<typeof RawGitHubRepositoryCloneUrlsSchema>,
 ): GitHubRepositoryCloneUrls {
@@ -283,6 +319,16 @@ function normalizeRepositoryCloneUrls(
     nameWithOwner: raw.nameWithOwner,
     url: raw.url,
     sshUrl: raw.sshUrl,
+  };
+}
+
+function normalizeRepositorySearchResult(
+  raw: Schema.Schema.Type<typeof RawGitHubRepositorySearchResultSchema>,
+): GitHubRepositoryCloneUrls {
+  return {
+    nameWithOwner: raw.fullName,
+    url: raw.url.toString(),
+    sshUrl: `git@${GITHUB_DOT_COM}:${raw.fullName}.git`,
   };
 }
 
@@ -338,6 +384,148 @@ export const make = Effect.gen(function* () {
         ...(input.maxOutputBytes !== undefined ? { maxOutputBytes: input.maxOutputBytes } : {}),
       })
       .pipe(Effect.mapError((error) => fromVcsError({ command: "gh", cwd: input.cwd }, error)));
+
+  const authenticatedAccountCache = yield* Cache.makeWith<string, string, GitHubCliError>(
+    (cwd) =>
+      execute({
+        cwd,
+        args: ["api", "user", "--hostname", GITHUB_DOT_COM, "--jq", ".login"],
+      }).pipe(
+        Effect.flatMap((result) => {
+          const account = result.stdout.trim();
+          return account.length > 0
+            ? Effect.succeed(account)
+            : Effect.fail(
+                new GitHubCliAuthenticationError({
+                  command: "gh",
+                  cwd,
+                }),
+              );
+        }),
+      ),
+    {
+      capacity: 16,
+      timeToLive: (exit) => (Exit.isSuccess(exit) ? AUTH_ACCOUNT_CACHE_TTL : Duration.zero),
+    },
+  );
+
+  const searchGitHubRepositories = Effect.fn("GitHubCli.searchGitHubRepositories")(
+    function* (input: {
+      readonly cwd: string;
+      readonly query: string;
+      readonly owner?: string;
+      readonly includeForks: boolean;
+    }) {
+      const result = yield* execute({
+        cwd: input.cwd,
+        args: [
+          "search",
+          "repos",
+          "--match",
+          "name",
+          ...(input.owner === undefined ? [] : ["--owner", input.owner]),
+          "--include-forks",
+          String(input.includeForks),
+          "--limit",
+          "20",
+          "--json",
+          "fullName,url",
+          "--",
+          input.query,
+        ],
+      });
+      const repositories = yield* decodeRawGitHubRepositorySearchResults(result.stdout.trim()).pipe(
+        Effect.mapError(
+          (cause) =>
+            new GitHubRepositorySearchDecodeError({
+              command: "gh",
+              cwd: input.cwd,
+              cause,
+            }),
+        ),
+      );
+      return repositories.map(normalizeRepositorySearchResult);
+    },
+  );
+
+  const getRepositoryCloneUrls = Effect.fn("GitHubCli.getRepositoryCloneUrls")(function* (input: {
+    readonly cwd: string;
+    readonly repository: string;
+  }) {
+    const repository = input.repository.trim();
+    const result = yield* execute({
+      cwd: input.cwd,
+      args: ["repo", "view", repository, "--json", "nameWithOwner,url,sshUrl"],
+    });
+    const raw = result.stdout.trim();
+    const urls = yield* decodeRawGitHubRepositoryCloneUrls(raw).pipe(
+      Effect.mapError(
+        (cause) =>
+          new GitHubRepositoryDecodeError({
+            command: "gh",
+            cwd: input.cwd,
+            cause,
+          }),
+      ),
+    );
+    return normalizeRepositoryCloneUrls(urls);
+  });
+
+  const searchRepositories = Effect.fn("GitHubCli.searchRepositories")(function* (input: {
+    readonly cwd: string;
+    readonly query: string;
+  }) {
+    const query = input.query.trim();
+    if (query.length === 0) {
+      return [];
+    }
+
+    const slashIndex = query.indexOf("/");
+    if (slashIndex >= 0) {
+      const owner = query.slice(0, slashIndex).trim();
+      const repositoryName = query.slice(slashIndex + 1).trim();
+      if (owner.length === 0 || repositoryName.length === 0) {
+        return [];
+      }
+      const repositories = yield* searchGitHubRepositories({
+        cwd: input.cwd,
+        query: repositoryName,
+        owner,
+        includeForks: true,
+      });
+      const exactNameWithOwner = `${owner}/${repositoryName}`.toLowerCase();
+      return [...repositories].sort((left, right) => {
+        const leftIsExact = left.nameWithOwner.toLowerCase() === exactNameWithOwner;
+        const rightIsExact = right.nameWithOwner.toLowerCase() === exactNameWithOwner;
+        return Number(rightIsExact) - Number(leftIsExact);
+      });
+    }
+
+    const account = yield* Cache.get(authenticatedAccountCache, input.cwd);
+    const [ownerMatches, globalMatches] = yield* Effect.all(
+      [
+        searchGitHubRepositories({
+          cwd: input.cwd,
+          query,
+          owner: account,
+          includeForks: true,
+        }),
+        searchGitHubRepositories({
+          cwd: input.cwd,
+          query,
+          includeForks: false,
+        }),
+      ],
+      { concurrency: "unbounded" },
+    );
+    const repositories = new Map<string, GitHubRepositoryCloneUrls>();
+    for (const repository of [...ownerMatches, ...globalMatches]) {
+      if (!repositories.has(repository.nameWithOwner)) {
+        repositories.set(repository.nameWithOwner, repository);
+      }
+    }
+    return [...repositories.values()].slice(0, 20);
+  });
 
   return GitHubCli.of({
     execute,
@@ -412,26 +600,8 @@ export const make = Effect.gen(function* () {
           ),
         ),
       ),
-    getRepositoryCloneUrls: (input) =>
-      execute({
-        cwd: input.cwd,
-        args: ["repo", "view", input.repository, "--json", "nameWithOwner,url,sshUrl"],
-      }).pipe(
-        Effect.map((result) => result.stdout.trim()),
-        Effect.flatMap((raw) =>
-          decodeRawGitHubRepositoryCloneUrls(raw).pipe(
-            Effect.mapError(
-              (cause) =>
-                new GitHubRepositoryDecodeError({
-                  command: "gh",
-                  cwd: input.cwd,
-                  cause,
-                }),
-            ),
-          ),
-        ),
-        Effect.map(normalizeRepositoryCloneUrls),
-      ),
+    getRepositoryCloneUrls,
+    searchRepositories,
     createRepository: (input) =>
       execute({
         cwd: input.cwd,

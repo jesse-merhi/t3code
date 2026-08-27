@@ -16,6 +16,33 @@ const processOutput = (stdout: string): VcsProcess.VcsProcessOutput => ({
   stderrTruncated: false,
 });
 
+const repositorySearchOutput = (...fullNames: ReadonlyArray<string>): VcsProcess.VcsProcessOutput =>
+  processOutput(
+    JSON.stringify(
+      fullNames.map((fullName) => ({ fullName, url: `https://github.com/${fullName}` })),
+    ),
+  );
+
+const repositorySearchArgs = (input: {
+  readonly query: string;
+  readonly owner?: string;
+  readonly includeForks: boolean;
+}): ReadonlyArray<string> => [
+  "search",
+  "repos",
+  "--match",
+  "name",
+  ...(input.owner === undefined ? [] : ["--owner", input.owner]),
+  "--include-forks",
+  String(input.includeForks),
+  "--limit",
+  "20",
+  "--json",
+  "fullName,url",
+  "--",
+  input.query,
+];
+
 const mockRun = vi.fn<VcsProcess.VcsProcess["Service"]["run"]>();
 
 const layer = GitHubCli.layer.pipe(
@@ -289,6 +316,138 @@ describe("GitHubCli.layer", () => {
         url: "https://github.com/octocat/codething-mvp",
         sshUrl: "git@github.com:octocat/codething-mvp.git",
       });
+      expect(mockRun).toHaveBeenCalledTimes(1);
+      expect(mockRun).toHaveBeenCalledWith({
+        operation: "GitHubCli.execute",
+        command: "gh",
+        args: ["repo", "view", "octocat/codething-mvp", "--json", "nameWithOwner,url,sshUrl"],
+        cwd: "/repo",
+        timeoutMs: 30_000,
+      });
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("searches repositories with the authenticated owner's matches first", () =>
+    Effect.gen(function* () {
+      mockRun
+        .mockReturnValueOnce(Effect.succeed(processOutput("current-user\n")))
+        .mockReturnValueOnce(Effect.succeed(repositorySearchOutput("current-user/skills")))
+        .mockReturnValueOnce(
+          Effect.succeed(
+            repositorySearchOutput(
+              "mattpocock/skills",
+              "current-user/skills",
+              "someone-else/skills",
+            ),
+          ),
+        );
+
+      const gh = yield* GitHubCli.GitHubCli;
+      const result = yield* gh.searchRepositories({
+        cwd: "/repo",
+        query: "skills",
+      });
+
+      assert.deepStrictEqual(
+        result.map((repository) => repository.nameWithOwner),
+        ["current-user/skills", "mattpocock/skills", "someone-else/skills"],
+      );
+      assert.equal(result[0]?.sshUrl, "git@github.com:current-user/skills.git");
+      expect(mockRun).toHaveBeenCalledTimes(3);
+      expect(mockRun).toHaveBeenNthCalledWith(1, {
+        operation: "GitHubCli.execute",
+        command: "gh",
+        args: ["api", "user", "--hostname", "github.com", "--jq", ".login"],
+        cwd: "/repo",
+        timeoutMs: 30_000,
+      });
+      expect(mockRun).toHaveBeenNthCalledWith(2, {
+        operation: "GitHubCli.execute",
+        command: "gh",
+        args: repositorySearchArgs({ query: "skills", owner: "current-user", includeForks: true }),
+        cwd: "/repo",
+        timeoutMs: 30_000,
+      });
+      expect(mockRun).toHaveBeenNthCalledWith(3, {
+        operation: "GitHubCli.execute",
+        command: "gh",
+        args: repositorySearchArgs({ query: "skills", includeForks: false }),
+        cwd: "/repo",
+        timeoutMs: 30_000,
+      });
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("returns an exact owner and repository path before other owner matches", () =>
+    Effect.gen(function* () {
+      mockRun.mockReturnValueOnce(
+        Effect.succeed(repositorySearchOutput("octocat/codething-tools", "octocat/codething-mvp")),
+      );
+
+      const gh = yield* GitHubCli.GitHubCli;
+      const result = yield* gh.searchRepositories({
+        cwd: "/repo",
+        query: " octocat/codething-mvp ",
+      });
+
+      assert.deepStrictEqual(result, [
+        {
+          nameWithOwner: "octocat/codething-mvp",
+          url: "https://github.com/octocat/codething-mvp",
+          sshUrl: "git@github.com:octocat/codething-mvp.git",
+        },
+        {
+          nameWithOwner: "octocat/codething-tools",
+          url: "https://github.com/octocat/codething-tools",
+          sshUrl: "git@github.com:octocat/codething-tools.git",
+        },
+      ]);
+      expect(mockRun).toHaveBeenCalledTimes(1);
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("searches within an owner for a partial repository path", () =>
+    Effect.gen(function* () {
+      mockRun.mockReturnValueOnce(Effect.succeed(repositorySearchOutput("octocat/codething-mvp")));
+
+      const gh = yield* GitHubCli.GitHubCli;
+      const result = yield* gh.searchRepositories({ cwd: "/repo", query: "octocat/code" });
+
+      assert.deepStrictEqual(
+        result.map((repository) => repository.nameWithOwner),
+        ["octocat/codething-mvp"],
+      );
+      expect(mockRun).toHaveBeenCalledTimes(1);
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("returns no repository search results when there are no matches", () =>
+    Effect.gen(function* () {
+      mockRun
+        .mockReturnValueOnce(Effect.succeed(processOutput("current-user\n")))
+        .mockReturnValueOnce(Effect.succeed(processOutput("[]")))
+        .mockReturnValueOnce(Effect.succeed(processOutput("[]")));
+
+      const gh = yield* GitHubCli.GitHubCli;
+      const result = yield* gh.searchRepositories({ cwd: "/repo", query: "does-not-exist" });
+
+      assert.deepStrictEqual(result, []);
+      expect(mockRun).toHaveBeenCalledTimes(3);
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("reports a missing authenticated account without fabricating a cause", () =>
+    Effect.gen(function* () {
+      mockRun.mockReturnValueOnce(Effect.succeed(processOutput("")));
+
+      const gh = yield* GitHubCli.GitHubCli;
+      const error = yield* gh
+        .searchRepositories({ cwd: "/repo", query: "skills" })
+        .pipe(Effect.flip);
+
+      assert.equal(error._tag, "GitHubCliAuthenticationError");
+      assert.notProperty(error, "cause");
+      expect(mockRun).toHaveBeenCalledTimes(1);
     }).pipe(Effect.provide(layer)),
   );
 

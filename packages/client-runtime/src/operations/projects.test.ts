@@ -17,6 +17,7 @@ import {
   getCloneDestinationPath,
   getCloneDirectoryName,
   getDefaultCloneUrl,
+  isGitHubRepositoryShorthand,
   normalizePastedCloneUrl,
   resolveAddProjectPath,
   sortAddProjectProviderSources,
@@ -49,6 +50,8 @@ describe("add project shared logic", () => {
   });
 
   it("routes owner/repository shorthand to GitHub over HTTPS", () => {
+    expect(isGitHubRepositoryShorthand("imputnet/helium")).toBe(true);
+    expect(isGitHubRepositoryShorthand("skills")).toBe(false);
     expect(normalizePastedCloneUrl("imputnet/helium")).toBe(
       "https://github.com/imputnet/helium.git",
     );

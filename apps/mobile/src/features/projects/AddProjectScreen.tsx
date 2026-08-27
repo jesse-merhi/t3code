@@ -11,6 +11,7 @@ import {
   getCloneDestinationPath,
   getCloneDirectoryName,
   getDefaultCloneUrl,
+  isGitHubRepositoryShorthand,
   normalizePastedCloneUrl,
   resolveAddProjectPath,
   sortAddProjectProviderSources,
@@ -31,7 +32,12 @@ import {
   inferProjectTitleFromPath,
   isWindowsPlatform,
 } from "@t3tools/client-runtime/state/projects";
-import { CommandId, type EnvironmentId, ProjectId } from "@t3tools/contracts";
+import {
+  CommandId,
+  type EnvironmentId,
+  ProjectId,
+  type SourceControlRepositoryInfo,
+} from "@t3tools/contracts";
 import { CommonActions, StackActions, useNavigation } from "@react-navigation/native";
 import { SymbolView } from "../../components/AppSymbol";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -55,6 +61,7 @@ import { useThemeColor } from "../../lib/useThemeColor";
 import { uuidv4 } from "../../lib/uuid";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useAtomQueryRunner } from "../../state/use-atom-query-runner";
+import { useDebouncedValue } from "../../state/queries";
 import {
   useRemoteConnectionStatus,
   useRemoteEnvironmentRuntime,
@@ -71,6 +78,8 @@ interface EnvironmentOption {
   readonly connectionError: string | null;
   readonly connectionErrorTraceId: string | null;
 }
+
+const REPOSITORY_SEARCH_DEBOUNCE_MS = 100;
 
 const environmentOptionOrder = Order.mapInput(
   Order.Struct({
@@ -651,12 +660,84 @@ export function AddProjectRepositoryScreen(props: {
   const lookupRepositoryQuery = useAtomQueryRunner(sourceControlEnvironment.repository, {
     reportFailure: false,
   });
+  const searchRepositoriesQuery = useAtomQueryRunner(sourceControlEnvironment.repositorySearch, {
+    reportFailure: false,
+  });
   const navigation = useNavigation();
+  const iconColor = useThemeColor("--color-icon");
   const environment = useEnvironmentFromParam(props.environmentId);
   const source = sourceFromParam(props.source);
   const [repositoryInput, setRepositoryInput] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [repositories, setRepositories] =
+    useState<ReadonlyArray<SourceControlRepositoryInfo> | null>(null);
+  const normalizedRepositoryInput = repositoryInput.trim();
+  const debouncedRepositoryInput = useDebouncedValue(
+    normalizedRepositoryInput,
+    REPOSITORY_SEARCH_DEBOUNCE_MS,
+  );
+  const githubRepositorySearchEnvironmentId =
+    source === "github" ? (environment?.environmentId ?? null) : null;
+
+  useEffect(() => {
+    if (githubRepositorySearchEnvironmentId === null) {
+      return;
+    }
+    if (
+      normalizedRepositoryInput.length === 0 ||
+      normalizedRepositoryInput !== debouncedRepositoryInput
+    ) {
+      setIsSubmitting(normalizedRepositoryInput.length > 0);
+      return;
+    }
+
+    let cancelled = false;
+    setError(null);
+    setIsSubmitting(true);
+    void searchRepositoriesQuery({
+      environmentId: githubRepositorySearchEnvironmentId,
+      input: {
+        provider: "github",
+        query: debouncedRepositoryInput,
+      },
+    }).then((result) => {
+      if (cancelled) {
+        return;
+      }
+      setIsSubmitting(false);
+      if (AsyncResult.isFailure(result)) {
+        setError(errorMessage(Cause.squash(result.cause)));
+      } else {
+        setRepositories(result.value);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    debouncedRepositoryInput,
+    githubRepositorySearchEnvironmentId,
+    normalizedRepositoryInput,
+    searchRepositoriesQuery,
+  ]);
+
+  const selectRepository = useCallback(
+    (repository: SourceControlRepositoryInfo) => {
+      if (!environment) return;
+      navigation.dispatch(
+        StackActions.push("AddProjectDestination", {
+          environmentId: environment.environmentId,
+          source,
+          remoteUrl: getDefaultCloneUrl(repository),
+          repositoryTitle: repository.nameWithOwner,
+          repositoryName: getCloneDirectoryName(repository.nameWithOwner),
+        }),
+      );
+    },
+    [environment, navigation, source],
+  );
 
   const lookupRepository = useCallback(async () => {
     if (!environment || repositoryInput.trim().length === 0 || isSubmitting) return;
@@ -674,6 +755,11 @@ export function AddProjectRepositoryScreen(props: {
           repositoryName: getCloneDirectoryName(remoteUrl),
         }),
       );
+      setIsSubmitting(false);
+      return;
+    }
+
+    if (provider === "github" && !isGitHubRepositoryShorthand(repositoryInput)) {
       setIsSubmitting(false);
       return;
     }
@@ -710,7 +796,13 @@ export function AddProjectRepositoryScreen(props: {
           <TextInput
             className="h-12 min-h-12 rounded-[24px] px-4 py-0 text-base leading-snug"
             value={repositoryInput}
-            onChangeText={setRepositoryInput}
+            onChangeText={(value) => {
+              if (value.trim() !== normalizedRepositoryInput) {
+                setRepositories(null);
+                setError(null);
+              }
+              setRepositoryInput(value);
+            }}
             autoCapitalize="none"
             autoCorrect={false}
             placeholder={
@@ -718,15 +810,45 @@ export function AddProjectRepositoryScreen(props: {
                 ? "https://github.com/org/repo.git"
                 : addProjectRemoteSourcePathHint(source)
             }
-            returnKeyType="next"
+            returnKeyType={source === "github" ? "done" : "next"}
             onSubmitEditing={() => void lookupRepository()}
           />
-          <PrimaryActionButton
-            label={source === "url" ? "Continue" : "Lookup repository"}
-            disabled={isSubmitting || repositoryInput.trim().length === 0}
-            onPress={() => void lookupRepository()}
-            loading={isSubmitting}
-          />
+          {source === "github" ? null : (
+            <PrimaryActionButton
+              label={source === "url" ? "Continue" : "Lookup repository"}
+              disabled={isSubmitting || repositoryInput.trim().length === 0}
+              onPress={() => void lookupRepository()}
+              loading={isSubmitting}
+            />
+          )}
+          {source === "github" && isSubmitting ? (
+            <View className="items-center py-3">
+              <ActivityIndicator />
+            </View>
+          ) : null}
+          {repositories ? (
+            <>
+              <SectionTitle>Repositories</SectionTitle>
+              <ListSection>
+                {repositories.length === 0 ? (
+                  <View className="items-center px-4 py-5">
+                    <Text className="text-sm text-foreground-muted">No repositories found.</Text>
+                  </View>
+                ) : (
+                  repositories.map((repository, index) => (
+                    <ListRow
+                      key={repository.nameWithOwner}
+                      title={repository.nameWithOwner}
+                      subtitle={repository.url}
+                      icon={<SourceControlIcon kind="github" size={18} color={String(iconColor)} />}
+                      isFirst={index === 0}
+                      onPress={() => selectRepository(repository)}
+                    />
+                  ))
+                )}
+              </ListSection>
+            </>
+          ) : null}
         </>
       ) : (
         <EmptyEnvironmentState />
