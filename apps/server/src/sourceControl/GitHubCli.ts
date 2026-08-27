@@ -18,7 +18,28 @@ import {
 } from "./gitHubPullRequests.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
-const GITHUB_DOT_COM = "github.com";
+const SEARCH_REPOSITORIES_QUERY = `
+  query SearchRepositories($ownerQuery: String!, $globalQuery: String!) {
+    owner: search(query: $ownerQuery, type: REPOSITORY, first: 20) {
+      nodes {
+        ... on Repository {
+          nameWithOwner
+          url
+          sshUrl
+        }
+      }
+    }
+    global: search(query: $globalQuery, type: REPOSITORY, first: 20) {
+      nodes {
+        ... on Repository {
+          nameWithOwner
+          url
+          sshUrl
+        }
+      }
+    }
+  }
+`.trim();
 
 const gitHubCliFailureFields = {
   command: Schema.Literal("gh"),
@@ -297,11 +318,19 @@ const decodeRawGitHubRepositoryCloneUrls = Schema.decodeEffect(
 );
 
 const RawGitHubRepositorySearchResultSchema = Schema.Struct({
-  fullName: TrimmedNonEmptyString,
-  url: Schema.URLFromString,
+  nameWithOwner: TrimmedNonEmptyString,
+  url: TrimmedNonEmptyString,
+  sshUrl: TrimmedNonEmptyString,
 });
 const decodeRawGitHubRepositorySearchResults = Schema.decodeEffect(
-  Schema.fromJsonString(Schema.Array(RawGitHubRepositorySearchResultSchema)),
+  Schema.fromJsonString(
+    Schema.Struct({
+      data: Schema.Struct({
+        owner: Schema.Struct({ nodes: Schema.Array(RawGitHubRepositorySearchResultSchema) }),
+        global: Schema.Struct({ nodes: Schema.Array(RawGitHubRepositorySearchResultSchema) }),
+      }),
+    }),
+  ),
 );
 
 function normalizeRepositoryCloneUrls(
@@ -311,16 +340,6 @@ function normalizeRepositoryCloneUrls(
     nameWithOwner: raw.nameWithOwner,
     url: raw.url,
     sshUrl: raw.sshUrl,
-  };
-}
-
-function normalizeRepositorySearchResult(
-  raw: Schema.Schema.Type<typeof RawGitHubRepositorySearchResultSchema>,
-): GitHubRepositoryCloneUrls {
-  return {
-    nameWithOwner: raw.fullName,
-    url: raw.url.toString(),
-    sshUrl: `git@${GITHUB_DOT_COM}:${raw.fullName}.git`,
   };
 }
 
@@ -377,45 +396,6 @@ export const make = Effect.gen(function* () {
       })
       .pipe(Effect.mapError((error) => fromVcsError({ command: "gh", cwd: input.cwd }, error)));
 
-  const searchGitHubRepositories = Effect.fn("GitHubCli.searchGitHubRepositories")(
-    function* (input: {
-      readonly cwd: string;
-      readonly query: string;
-      readonly owner?: string;
-      readonly includeForks: boolean;
-    }) {
-      const result = yield* execute({
-        cwd: input.cwd,
-        args: [
-          "search",
-          "repos",
-          "--match",
-          "name",
-          ...(input.owner === undefined ? [] : ["--owner", input.owner]),
-          "--include-forks",
-          String(input.includeForks),
-          "--limit",
-          "20",
-          "--json",
-          "fullName,url",
-          "--",
-          input.query,
-        ],
-      });
-      const repositories = yield* decodeRawGitHubRepositorySearchResults(result.stdout.trim()).pipe(
-        Effect.mapError(
-          (cause) =>
-            new GitHubRepositorySearchDecodeError({
-              command: "gh",
-              cwd: input.cwd,
-              cause,
-            }),
-        ),
-      );
-      return repositories.map(normalizeRepositorySearchResult);
-    },
-  );
-
   const searchRepositories = Effect.fn("GitHubCli.searchRepositories")(function* (input: {
     readonly cwd: string;
     readonly query: string;
@@ -426,49 +406,62 @@ export const make = Effect.gen(function* () {
     }
 
     const slashIndex = query.indexOf("/");
-    if (slashIndex >= 0) {
+    let ownerQuery: string;
+    let globalQuery: string;
+    let exactNameWithOwner: string | null = null;
+    if (slashIndex < 0) {
+      ownerQuery = `${query} in:name user:@me fork:true`;
+      globalQuery = `${query} in:name fork:false`;
+    } else {
       const owner = query.slice(0, slashIndex).trim();
       const repositoryName = query.slice(slashIndex + 1).trim();
       if (owner.length === 0 || repositoryName.length === 0) {
         return [];
       }
-      const repositories = yield* searchGitHubRepositories({
-        cwd: input.cwd,
-        query: repositoryName,
-        owner,
-        includeForks: true,
-      });
-      const exactNameWithOwner = `${owner}/${repositoryName}`.toLowerCase();
-      return [...repositories].sort((left, right) => {
-        const leftIsExact = left.nameWithOwner.toLowerCase() === exactNameWithOwner;
-        const rightIsExact = right.nameWithOwner.toLowerCase() === exactNameWithOwner;
-        return Number(rightIsExact) - Number(leftIsExact);
-      });
+      ownerQuery = `${repositoryName} in:name user:${owner} fork:true`;
+      globalQuery = ownerQuery;
+      exactNameWithOwner = `${owner}/${repositoryName}`.toLowerCase();
     }
 
-    const [ownerMatches, globalMatches] = yield* Effect.all(
-      [
-        searchGitHubRepositories({
-          cwd: input.cwd,
-          query,
-          owner: "@me",
-          includeForks: true,
-        }),
-        searchGitHubRepositories({
-          cwd: input.cwd,
-          query,
-          includeForks: false,
-        }),
+    const result = yield* execute({
+      cwd: input.cwd,
+      args: [
+        "api",
+        "graphql",
+        "-f",
+        `query=${SEARCH_REPOSITORIES_QUERY}`,
+        "-f",
+        `ownerQuery=${ownerQuery}`,
+        "-f",
+        `globalQuery=${globalQuery}`,
       ],
-      { concurrency: "unbounded" },
+    });
+    const response = yield* decodeRawGitHubRepositorySearchResults(result.stdout.trim()).pipe(
+      Effect.mapError(
+        (cause) =>
+          new GitHubRepositorySearchDecodeError({
+            command: "gh",
+            cwd: input.cwd,
+            cause,
+          }),
+      ),
     );
     const repositories = new Map<string, GitHubRepositoryCloneUrls>();
-    for (const repository of [...ownerMatches, ...globalMatches]) {
+    for (const repository of [...response.data.owner.nodes, ...response.data.global.nodes]) {
       if (!repositories.has(repository.nameWithOwner)) {
         repositories.set(repository.nameWithOwner, repository);
       }
     }
-    return [...repositories.values()].slice(0, 20);
+    return [...repositories.values()]
+      .sort((left, right) => {
+        if (exactNameWithOwner === null) {
+          return 0;
+        }
+        const leftIsExact = left.nameWithOwner.toLowerCase() === exactNameWithOwner;
+        const rightIsExact = right.nameWithOwner.toLowerCase() === exactNameWithOwner;
+        return Number(rightIsExact) - Number(leftIsExact);
+      })
+      .slice(0, 20);
   });
 
   return GitHubCli.of({
