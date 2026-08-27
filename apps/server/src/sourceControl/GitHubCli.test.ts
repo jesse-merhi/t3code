@@ -316,21 +316,12 @@ describe("GitHubCli.layer", () => {
         url: "https://github.com/octocat/codething-mvp",
         sshUrl: "git@github.com:octocat/codething-mvp.git",
       });
-      expect(mockRun).toHaveBeenCalledTimes(1);
-      expect(mockRun).toHaveBeenCalledWith({
-        operation: "GitHubCli.execute",
-        command: "gh",
-        args: ["repo", "view", "octocat/codething-mvp", "--json", "nameWithOwner,url,sshUrl"],
-        cwd: "/repo",
-        timeoutMs: 30_000,
-      });
     }).pipe(Effect.provide(layer)),
   );
 
   it.effect("searches repositories with the authenticated owner's matches first", () =>
     Effect.gen(function* () {
       mockRun
-        .mockReturnValueOnce(Effect.succeed(processOutput("current-user\n")))
         .mockReturnValueOnce(Effect.succeed(repositorySearchOutput("current-user/skills")))
         .mockReturnValueOnce(
           Effect.succeed(
@@ -353,22 +344,15 @@ describe("GitHubCli.layer", () => {
         ["current-user/skills", "mattpocock/skills", "someone-else/skills"],
       );
       assert.equal(result[0]?.sshUrl, "git@github.com:current-user/skills.git");
-      expect(mockRun).toHaveBeenCalledTimes(3);
+      expect(mockRun).toHaveBeenCalledTimes(2);
       expect(mockRun).toHaveBeenNthCalledWith(1, {
         operation: "GitHubCli.execute",
         command: "gh",
-        args: ["api", "user", "--hostname", "github.com", "--jq", ".login"],
+        args: repositorySearchArgs({ query: "skills", owner: "@me", includeForks: true }),
         cwd: "/repo",
         timeoutMs: 30_000,
       });
       expect(mockRun).toHaveBeenNthCalledWith(2, {
-        operation: "GitHubCli.execute",
-        command: "gh",
-        args: repositorySearchArgs({ query: "skills", owner: "current-user", includeForks: true }),
-        cwd: "/repo",
-        timeoutMs: 30_000,
-      });
-      expect(mockRun).toHaveBeenNthCalledWith(3, {
         operation: "GitHubCli.execute",
         command: "gh",
         args: repositorySearchArgs({ query: "skills", includeForks: false }),
@@ -424,7 +408,6 @@ describe("GitHubCli.layer", () => {
   it.effect("returns no repository search results when there are no matches", () =>
     Effect.gen(function* () {
       mockRun
-        .mockReturnValueOnce(Effect.succeed(processOutput("current-user\n")))
         .mockReturnValueOnce(Effect.succeed(processOutput("[]")))
         .mockReturnValueOnce(Effect.succeed(processOutput("[]")));
 
@@ -432,22 +415,7 @@ describe("GitHubCli.layer", () => {
       const result = yield* gh.searchRepositories({ cwd: "/repo", query: "does-not-exist" });
 
       assert.deepStrictEqual(result, []);
-      expect(mockRun).toHaveBeenCalledTimes(3);
-    }).pipe(Effect.provide(layer)),
-  );
-
-  it.effect("reports a missing authenticated account without fabricating a cause", () =>
-    Effect.gen(function* () {
-      mockRun.mockReturnValueOnce(Effect.succeed(processOutput("")));
-
-      const gh = yield* GitHubCli.GitHubCli;
-      const error = yield* gh
-        .searchRepositories({ cwd: "/repo", query: "skills" })
-        .pipe(Effect.flip);
-
-      assert.equal(error._tag, "GitHubCliAuthenticationError");
-      assert.notProperty(error, "cause");
-      expect(mockRun).toHaveBeenCalledTimes(1);
+      expect(mockRun).toHaveBeenCalledTimes(2);
     }).pipe(Effect.provide(layer)),
   );
 

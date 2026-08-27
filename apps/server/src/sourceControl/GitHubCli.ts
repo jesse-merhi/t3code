@@ -1,8 +1,5 @@
-import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
-import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
 import * as Result from "effect/Result";
@@ -22,7 +19,6 @@ import {
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const GITHUB_DOT_COM = "github.com";
-const AUTH_ACCOUNT_CACHE_TTL = Duration.minutes(5);
 
 const gitHubCliFailureFields = {
   command: Schema.Literal("gh"),
@@ -45,11 +41,7 @@ export class GitHubCliUnavailableError extends Schema.TaggedErrorClass<GitHubCli
 
 export class GitHubCliAuthenticationError extends Schema.TaggedErrorClass<GitHubCliAuthenticationError>()(
   "GitHubCliAuthenticationError",
-  {
-    command: Schema.Literal("gh"),
-    cwd: Schema.String,
-    cause: Schema.optional(Schema.Defect()),
-  },
+  gitHubCliFailureFields,
 ) {
   get detail(): string {
     return "GitHub CLI is not authenticated. Run `gh auth login` and retry.";
@@ -385,30 +377,6 @@ export const make = Effect.gen(function* () {
       })
       .pipe(Effect.mapError((error) => fromVcsError({ command: "gh", cwd: input.cwd }, error)));
 
-  const authenticatedAccountCache = yield* Cache.makeWith<string, string, GitHubCliError>(
-    (cwd) =>
-      execute({
-        cwd,
-        args: ["api", "user", "--hostname", GITHUB_DOT_COM, "--jq", ".login"],
-      }).pipe(
-        Effect.flatMap((result) => {
-          const account = result.stdout.trim();
-          return account.length > 0
-            ? Effect.succeed(account)
-            : Effect.fail(
-                new GitHubCliAuthenticationError({
-                  command: "gh",
-                  cwd,
-                }),
-              );
-        }),
-      ),
-    {
-      capacity: 16,
-      timeToLive: (exit) => (Exit.isSuccess(exit) ? AUTH_ACCOUNT_CACHE_TTL : Duration.zero),
-    },
-  );
-
   const searchGitHubRepositories = Effect.fn("GitHubCli.searchGitHubRepositories")(
     function* (input: {
       readonly cwd: string;
@@ -448,29 +416,6 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  const getRepositoryCloneUrls = Effect.fn("GitHubCli.getRepositoryCloneUrls")(function* (input: {
-    readonly cwd: string;
-    readonly repository: string;
-  }) {
-    const repository = input.repository.trim();
-    const result = yield* execute({
-      cwd: input.cwd,
-      args: ["repo", "view", repository, "--json", "nameWithOwner,url,sshUrl"],
-    });
-    const raw = result.stdout.trim();
-    const urls = yield* decodeRawGitHubRepositoryCloneUrls(raw).pipe(
-      Effect.mapError(
-        (cause) =>
-          new GitHubRepositoryDecodeError({
-            command: "gh",
-            cwd: input.cwd,
-            cause,
-          }),
-      ),
-    );
-    return normalizeRepositoryCloneUrls(urls);
-  });
-
   const searchRepositories = Effect.fn("GitHubCli.searchRepositories")(function* (input: {
     readonly cwd: string;
     readonly query: string;
@@ -501,13 +446,12 @@ export const make = Effect.gen(function* () {
       });
     }
 
-    const account = yield* Cache.get(authenticatedAccountCache, input.cwd);
     const [ownerMatches, globalMatches] = yield* Effect.all(
       [
         searchGitHubRepositories({
           cwd: input.cwd,
           query,
-          owner: account,
+          owner: "@me",
           includeForks: true,
         }),
         searchGitHubRepositories({
@@ -600,7 +544,26 @@ export const make = Effect.gen(function* () {
           ),
         ),
       ),
-    getRepositoryCloneUrls,
+    getRepositoryCloneUrls: (input) =>
+      execute({
+        cwd: input.cwd,
+        args: ["repo", "view", input.repository, "--json", "nameWithOwner,url,sshUrl"],
+      }).pipe(
+        Effect.map((result) => result.stdout.trim()),
+        Effect.flatMap((raw) =>
+          decodeRawGitHubRepositoryCloneUrls(raw).pipe(
+            Effect.mapError(
+              (cause) =>
+                new GitHubRepositoryDecodeError({
+                  command: "gh",
+                  cwd: input.cwd,
+                  cause,
+                }),
+            ),
+          ),
+        ),
+        Effect.map(normalizeRepositoryCloneUrls),
+      ),
     searchRepositories,
     createRepository: (input) =>
       execute({

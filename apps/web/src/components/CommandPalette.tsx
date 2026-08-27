@@ -215,8 +215,6 @@ type AddProjectCloneFlow =
       readonly step: "repository";
       readonly environmentId: EnvironmentId;
       readonly source: AddProjectRemoteSource;
-      readonly repositories: ReadonlyArray<SourceControlRepositoryInfo> | null;
-      readonly repositoryQuery: string | null;
     }
   | {
       readonly step: "confirm";
@@ -225,7 +223,6 @@ type AddProjectCloneFlow =
       readonly repositoryInput: string;
       readonly repository: SourceControlRepositoryInfo | null;
       readonly remoteUrl: string;
-      readonly searchResults: ReadonlyArray<SourceControlRepositoryInfo> | null;
     };
 
 const REMOTE_PROJECT_SOURCES: ReadonlyArray<AddProjectRemoteSource> = [
@@ -581,9 +578,6 @@ function OpenCommandPaletteDialog(props: {
   const lookupRepository = useAtomQueryRunner(sourceControlEnvironment.repository, {
     reportFailure: false,
   });
-  const searchRepositories = useAtomQueryRunner(sourceControlEnvironment.repositorySearch, {
-    reportFailure: false,
-  });
   const loadBrowsePath = useAtomQueryRunner(filesystemEnvironment.browse, {
     reportFailure: false,
     reportDefect: false,
@@ -657,79 +651,31 @@ function OpenCommandPaletteDialog(props: {
       : null;
   const normalizedRepositorySearchQuery =
     githubRepositorySearchEnvironmentId === null ? "" : query.trim();
-  const hasCurrentGithubRepositorySearchResults =
-    addProjectCloneFlow?.step === "repository" &&
-    addProjectCloneFlow.source === "github" &&
-    addProjectCloneFlow.repositories !== null &&
-    addProjectCloneFlow.repositoryQuery === normalizedRepositorySearchQuery;
   const debouncedRepositorySearchQuery = useDebouncedValue(
     normalizedRepositorySearchQuery,
     REPOSITORY_SEARCH_DEBOUNCE_MS,
   );
-
-  useEffect(() => {
-    if (githubRepositorySearchEnvironmentId === null) {
-      setIsRemoteProjectLookingUp(false);
-      return;
-    }
-    if (hasCurrentGithubRepositorySearchResults) {
-      setIsRemoteProjectLookingUp(false);
-      return;
-    }
-    if (
-      normalizedRepositorySearchQuery.length === 0 ||
-      normalizedRepositorySearchQuery !== debouncedRepositorySearchQuery
-    ) {
-      setIsRemoteProjectLookingUp(normalizedRepositorySearchQuery.length > 0);
-      return;
-    }
-
-    let cancelled = false;
-    setIsRemoteProjectLookingUp(true);
-    void searchRepositories({
-      environmentId: githubRepositorySearchEnvironmentId,
-      input: {
-        provider: "github",
-        query: debouncedRepositorySearchQuery,
-      },
-    }).then((searchResult) => {
-      if (cancelled) {
-        return;
-      }
-      setIsRemoteProjectLookingUp(false);
-      if (searchResult._tag === "Failure") {
-        return;
-      }
-
-      setAddProjectCloneFlow((currentFlow) => {
-        if (
-          currentFlow?.source !== "github" ||
-          currentFlow.environmentId !== githubRepositorySearchEnvironmentId ||
-          currentFlow.step !== "repository"
-        ) {
-          return currentFlow;
-        }
-        return {
-          step: "repository",
-          environmentId: currentFlow.environmentId,
-          source: "github",
-          repositories: searchResult.value,
-          repositoryQuery: debouncedRepositorySearchQuery,
-        };
-      });
-      setHighlightedItemValue(null);
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    debouncedRepositorySearchQuery,
-    githubRepositorySearchEnvironmentId,
-    hasCurrentGithubRepositorySearchResults,
-    normalizedRepositorySearchQuery,
-    searchRepositories,
-  ]);
+  const settledRepositorySearchQuery =
+    normalizedRepositorySearchQuery.length > 0 &&
+    normalizedRepositorySearchQuery === debouncedRepositorySearchQuery
+      ? debouncedRepositorySearchQuery
+      : null;
+  const repositorySearch = useEnvironmentQuery(
+    githubRepositorySearchEnvironmentId !== null && settledRepositorySearchQuery !== null
+      ? sourceControlEnvironment.repositorySearch({
+          environmentId: githubRepositorySearchEnvironmentId,
+          input: {
+            provider: "github",
+            query: settledRepositorySearchQuery,
+          },
+        })
+      : null,
+  );
+  const repositorySearchResults = repositorySearch.data;
+  const isGitHubRepositorySearchPending =
+    normalizedRepositorySearchQuery.length > 0 &&
+    (normalizedRepositorySearchQuery !== debouncedRepositorySearchQuery ||
+      repositorySearch.isPending);
   const projectGroupingSettings = useMemo(
     () => selectProjectGroupingSettings(clientSettings),
     [clientSettings],
@@ -1289,40 +1235,16 @@ function OpenCommandPaletteDialog(props: {
       popView();
       return;
     }
-    if (addProjectCloneFlow.searchResults) {
-      setAddProjectCloneFlow({
-        step: "repository",
-        environmentId: addProjectCloneFlow.environmentId,
-        source: "github",
-        repositories: addProjectCloneFlow.searchResults,
-        repositoryQuery: addProjectCloneFlow.repositoryInput,
-      });
-      setQuery(addProjectCloneFlow.repositoryInput);
-    } else {
-      setAddProjectCloneFlow({
-        step: "repository",
-        environmentId: addProjectCloneFlow.environmentId,
-        source: addProjectCloneFlow.source,
-        repositories: null,
-        repositoryQuery: null,
-      });
-      setQuery(addProjectCloneFlow.repositoryInput);
-    }
+    setAddProjectCloneFlow({
+      step: "repository",
+      environmentId: addProjectCloneFlow.environmentId,
+      source: addProjectCloneFlow.source,
+    });
+    setQuery(addProjectCloneFlow.repositoryInput);
     setBrowseGeneration((generation) => generation + 1);
   }
 
   function handleQueryChange(nextQuery: string): void {
-    if (
-      githubRepositorySearchEnvironmentId !== null &&
-      nextQuery.trim() !== normalizedRepositorySearchQuery
-    ) {
-      setIsRemoteProjectLookingUp(nextQuery.trim().length > 0);
-      setAddProjectCloneFlow((currentFlow) =>
-        currentFlow?.source === "github" && currentFlow.step === "repository"
-          ? { ...currentFlow, repositories: null, repositoryQuery: null }
-          : currentFlow,
-      );
-    }
     browseNavigation.invalidate();
     setHighlightedItemValue(null);
     setQuery(nextQuery);
@@ -1370,8 +1292,6 @@ function OpenCommandPaletteDialog(props: {
         step: "repository",
         environmentId,
         source,
-        repositories: null,
-        repositoryQuery: null,
       });
       pushPaletteView({
         addonIcon: remoteProjectSourceIcon(source, ADDON_ICON_CLASS),
@@ -1981,11 +1901,7 @@ function OpenCommandPaletteDialog(props: {
   }
 
   function selectAddProjectRepository(repository: SourceControlRepositoryInfo): void {
-    if (
-      addProjectCloneFlow?.step !== "repository" ||
-      addProjectCloneFlow.source !== "github" ||
-      addProjectCloneFlow.repositories === null
-    ) {
+    if (addProjectCloneFlow?.step !== "repository" || addProjectCloneFlow.source !== "github") {
       return;
     }
     setIsRemoteProjectLookingUp(false);
@@ -2000,7 +1916,6 @@ function OpenCommandPaletteDialog(props: {
       repositoryInput: query.trim(),
       repository,
       remoteUrl: getDefaultCloneUrl(repository),
-      searchResults: addProjectCloneFlow.repositories,
     });
     setHighlightedItemValue(null);
     setQuery(destinationPath);
@@ -2041,7 +1956,6 @@ function OpenCommandPaletteDialog(props: {
           repositoryInput: rawRepository,
           repository: null,
           remoteUrl: normalizePastedCloneUrl(rawRepository),
-          searchResults: null,
         });
         setHighlightedItemValue(null);
         setQuery(destinationPath);
@@ -2086,7 +2000,6 @@ function OpenCommandPaletteDialog(props: {
         repositoryInput: rawRepository,
         repository,
         remoteUrl: getDefaultCloneUrl(repository),
-        searchResults: null,
       });
       setHighlightedItemValue(null);
       setQuery(destinationPath);
@@ -2245,12 +2158,12 @@ function OpenCommandPaletteDialog(props: {
   const repositorySearchGroups: CommandPaletteView["groups"] =
     addProjectCloneFlow?.step === "repository" &&
     addProjectCloneFlow.source === "github" &&
-    addProjectCloneFlow.repositories !== null
+    repositorySearchResults !== null
       ? [
           {
             value: "repositories",
             label: "Repositories",
-            items: addProjectCloneFlow.repositories.map((repository) => ({
+            items: repositorySearchResults.map((repository) => ({
               kind: "action" as const,
               value: `repository:${repository.nameWithOwner}`,
               searchTerms: [repository.nameWithOwner, repository.url],
@@ -2263,13 +2176,6 @@ function OpenCommandPaletteDialog(props: {
           },
         ]
       : [];
-  const isGitHubRepositorySearchPending =
-    githubRepositorySearchEnvironmentId !== null &&
-    normalizedRepositorySearchQuery.length > 0 &&
-    !hasCurrentGithubRepositorySearchResults &&
-    (normalizedRepositorySearchQuery !== debouncedRepositorySearchQuery ||
-      isRemoteProjectLookingUp);
-
   let displayedGroups: CommandPaletteView["groups"] = filteredGroups;
   if (addProjectCloneFlow?.step === "repository") {
     displayedGroups =
@@ -2736,9 +2642,9 @@ function OpenCommandPaletteDialog(props: {
                       ? "Start typing to search GitHub repositories."
                       : isGitHubRepositorySearchPending
                         ? "Searching repositories…"
-                        : addProjectCloneFlow.repositories === null
+                        : repositorySearch.error !== null
                           ? "Unable to search repositories. Try again."
-                          : addProjectCloneFlow.repositories.length === 0
+                          : repositorySearchResults?.length === 0
                             ? "No repositories found."
                             : "Start typing to search GitHub repositories."
                     : "Enter a repository path and press Enter to look it up.",
